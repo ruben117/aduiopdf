@@ -120,6 +120,11 @@ class PDFToAudiobookApp:
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
         self.progress.pack(fill=tk.X)
 
+        self.lbl_progress = ttk.Label(
+            frame, text="", font=("Arial", 9)
+        )
+        self.lbl_progress.pack(anchor="e", pady=(4, 0))
+
     def browse_pdf(self):
         filename = filedialog.askopenfilename(
             title="Seleccionar PDF", filetypes=[("Archivos PDF", "*.pdf")]
@@ -138,74 +143,108 @@ class PDFToAudiobookApp:
                     for line in page_text.splitlines()
                     if line.strip() and not line.strip().isdigit()
                 ]
-                text_chunks.append(" ".join(lines))
-        return "\n\n".join(text_chunks)
+                joined = " ".join(lines)
+                if joined:
+                    text_chunks.append(joined)
+        return text_chunks
 
-    async def generate_audio(self, text, voice_code, output_file):
-        communicate = edge_tts.Communicate(text, voice_code)
-        await communicate.save(output_file)
+    async def generate_audio(self, chunks, voice_code, output_file, on_progress):
+        total = len(chunks)
+        with open(output_file, "wb") as out:
+            for i, chunk_text in enumerate(chunks, start=1):
+                communicate = edge_tts.Communicate(chunk_text, voice_code)
+                async for tts_chunk in communicate.stream():
+                    if tts_chunk["type"] == "audio":
+                        out.write(tts_chunk["data"])
+                on_progress(i, total)
 
-    def process_conversion(self):
-        pdf_file = self.pdf_path.get()
-        if not pdf_file:
-            messagebox.showwarning(
-                "Atención", "Por favor selecciona un archivo PDF."
-            )
-            self.reset_ui()
-            return
+    def _set_progress(self, current, total):
+        self.progress.config(value=current, maximum=total)
+        self.lbl_progress.config(text=f"Página {current} de {total}")
 
-        output_file = filedialog.asksaveasfilename(
-            defaultextension=".mp3",
-            filetypes=[("Archivos MP3", "*.mp3")],
-            initialfile=os.path.basename(pdf_file).replace(".pdf", ".mp3"),
-        )
-
-        if not output_file:
-            self.reset_ui()
-            return
-
+    def process_conversion(self, pdf_file, output_file):
         try:
-            self.lbl_status.config(text="Estado: Leyendo PDF...")
-            text = self.extract_text(pdf_file)
+            self.root.after(
+                0, self.lbl_status.config, {"text": "Estado: Leyendo PDF..."}
+            )
+            chunks = self.extract_text(pdf_file)
 
-            if not text.strip():
-                messagebox.showerror(
+            if not chunks:
+                self.root.after(
+                    0,
+                    messagebox.showerror,
                     "Error",
                     "No se pudo extraer texto del PDF (puede estar escaneado).",
                 )
-                self.reset_ui()
                 return
 
-            self.lbl_status.config(
-                text="Estado: Generando audio (espera un momento)..."
+            self.root.after(
+                0,
+                self.lbl_status.config,
+                {"text": "Estado: Generando audio..."},
             )
+            def switch_to_determinate():
+                self.progress.stop()
+                self.progress.config(
+                    mode="determinate", value=0, maximum=len(chunks)
+                )
+
+            self.root.after(0, switch_to_determinate)
+
+            def on_progress(current, total):
+                self.root.after(0, self._set_progress, current, total)
 
             voice_code = VOICES[self.selected_voice.get()]
-            asyncio.run(self.generate_audio(text, voice_code, output_file))
+            asyncio.run(
+                self.generate_audio(chunks, voice_code, output_file, on_progress)
+            )
 
-            messagebox.showinfo(
-                "Éxito", f"¡Audiolibro generado!\nGuardado en:\n{output_file}"
+            self.root.after(
+                0,
+                messagebox.showinfo,
+                "Éxito",
+                f"¡Audiolibro generado!\nGuardado en:\n{output_file}",
             )
         except Exception as e:
-            messagebox.showerror("Error", f"Ocurrió un error:\n{e}")
+            self.root.after(
+                0, messagebox.showerror, "Error", f"Ocurrió un error:\n{e}"
+            )
         finally:
-            self.reset_ui()
+            self.root.after(0, self.reset_ui)
 
     def start_conversion(self):
-        if not self.pdf_path.get():
+        pdf_file = self.pdf_path.get()
+        if not pdf_file:
             messagebox.showwarning(
                 "Atención", "Por favor selecciona un archivo PDF primero."
             )
             return
 
+        base_name = os.path.splitext(os.path.basename(pdf_file))[0]
+        output_file = filedialog.asksaveasfilename(
+            defaultextension=".mp3",
+            filetypes=[("Archivos MP3", "*.mp3")],
+            initialfile=f"{base_name}.mp3",
+        )
+        if not output_file:
+            return
+
         self.btn_convert.config(state="disabled")
+        self.lbl_progress.config(text="")
+        self.progress.config(mode="indeterminate")
         self.progress.start(10)
-        threading.Thread(target=self.process_conversion, daemon=True).start()
+        threading.Thread(
+            target=self.process_conversion,
+            args=(pdf_file, output_file),
+            daemon=True,
+        ).start()
 
     def reset_ui(self):
         self.progress.stop()
+        self.progress.config(mode="indeterminate", value=0)
         self.btn_convert.config(state="normal")
         self.lbl_status.config(text="Estado: Listo")
+        self.lbl_progress.config(text="")
 
 
 if __name__ == "__main__":
